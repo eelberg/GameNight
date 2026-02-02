@@ -89,8 +89,8 @@ export default function CollectionPage() {
   // Fetch BGG collection directly from client via CORS proxy (no Vercel timeout!)
   async function fetchBGGCollection(username: string): Promise<BGGCollectionItem[]> {
     const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
-    // Use CORS proxy to bypass BGG's lack of CORS headers
-    const PROXY_URL = `https://corsproxy.io/?${encodeURIComponent(BGG_URL)}`
+    // Use allorigins CORS proxy
+    const PROXY_URL = `https://api.allorigins.win/raw?url=${encodeURIComponent(BGG_URL)}`
     
     // Try multiple times - BGG returns 202 while processing
     for (let attempt = 0; attempt < 15; attempt++) {
@@ -98,26 +98,31 @@ export default function CollectionPage() {
       
       try {
         const response = await fetch(PROXY_URL)
+        const text = await response.text()
         
-        if (response.status === 202) {
-          // BGG is processing, wait and retry
+        // allorigins might return error as text
+        if (!response.ok || text.includes('error')) {
+          console.log('Response:', response.status, text.substring(0, 200))
           await new Promise(resolve => setTimeout(resolve, 3000))
           continue
         }
         
-        if (!response.ok) {
-          throw new Error(`BGG respondió con error ${response.status}`)
+        // Check if it's a 202 response (BGG queued the request)
+        if (text.includes('Your request for this collection has been accepted') || 
+            text.includes('message') && text.includes('processed')) {
+          toast.info('BGG está procesando tu colección...')
+          await new Promise(resolve => setTimeout(resolve, 4000))
+          continue
         }
         
-        const xml = await response.text()
-        
-        // Check if it's actually a 202 response in XML form
-        if (xml.includes('Your request for this collection has been accepted')) {
+        // Check if we got valid XML
+        if (!text.includes('<items')) {
+          console.log('Invalid response:', text.substring(0, 200))
           await new Promise(resolve => setTimeout(resolve, 3000))
           continue
         }
         
-        return parseBGGXML(xml)
+        return parseBGGXML(text)
       } catch (error) {
         console.error('Fetch error:', error)
         if (attempt < 14) {
