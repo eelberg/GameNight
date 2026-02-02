@@ -20,26 +20,45 @@ function setCache(key: string, data: unknown): void {
   cache.set(key, { data, timestamp: Date.now() })
 }
 
-async function fetchWithRetry(url: string, retries = 3): Promise<Response> {
+async function fetchWithRetry(url: string, retries = 5): Promise<Response> {
+  let lastError: Error | null = null
+  
   for (let i = 0; i < retries; i++) {
-    const response = await fetch(url)
-    
-    // BGG returns 202 when the request is queued
-    if (response.status === 202) {
-      await new Promise(resolve => setTimeout(resolve, 2000))
-      continue
-    }
-    
-    if (response.ok) {
-      return response
-    }
-    
-    if (i < retries - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)))
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/xml',
+        },
+      })
+      
+      // BGG returns 202 when the request is queued - need to wait longer
+      if (response.status === 202) {
+        console.log(`BGG returned 202, attempt ${i + 1}/${retries}, waiting...`)
+        await new Promise(resolve => setTimeout(resolve, 3000))
+        continue
+      }
+      
+      if (response.ok) {
+        return response
+      }
+      
+      console.log(`BGG returned ${response.status}, attempt ${i + 1}/${retries}`)
+      lastError = new Error(`BGG returned status ${response.status}`)
+      
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500 * (i + 1)))
+      }
+    } catch (error) {
+      console.log(`BGG fetch error, attempt ${i + 1}/${retries}:`, error)
+      lastError = error instanceof Error ? error : new Error('Unknown fetch error')
+      
+      if (i < retries - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1500 * (i + 1)))
+      }
     }
   }
   
-  throw new Error('Failed to fetch from BGG API after retries')
+  throw new Error(`Failed to fetch from BGG API after ${retries} retries: ${lastError?.message || 'Unknown error'}`)
 }
 
 export async function getUserCollection(username: string): Promise<BGGCollectionItem[]> {
