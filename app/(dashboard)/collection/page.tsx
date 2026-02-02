@@ -94,20 +94,50 @@ export default function CollectionPage() {
 
     setIsSyncing(true)
     try {
-      const response = await fetch('/api/bgg/collection', {
-        method: 'POST',
-      })
-
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(result.error)
+      // Step 1: Fetch collection from BGG (via our API)
+      toast.info('Obteniendo colección de BGG...')
+      const bggResponse = await fetch(`/api/bgg/collection?username=${encodeURIComponent(bggUsername)}`)
+      
+      if (!bggResponse.ok) {
+        const bggError = await bggResponse.json()
+        throw new Error(bggError.error || 'Error al obtener colección de BGG')
+      }
+      
+      const collection = await bggResponse.json()
+      
+      if (collection.length === 0) {
+        toast.info('No se encontraron juegos en tu colección de BGG')
+        return
       }
 
-      toast.success(result.message)
+      // Step 2: Save to database in batches
+      toast.info(`Guardando ${collection.length} juegos...`)
+      const BATCH_SIZE = 50
+      
+      for (let i = 0; i < collection.length; i += BATCH_SIZE) {
+        const batch = collection.slice(i, i + BATCH_SIZE)
+        
+        const response = await fetch('/api/bgg/collection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ collection: batch }),
+        })
+
+        if (!response.ok) {
+          const result = await response.json()
+          throw new Error(result.details || result.error || 'Error al guardar')
+        }
+      }
+
+      toast.success(`Sincronizados ${collection.length} juegos`)
       await loadCollection()
     } catch (error) {
-      toast.error('Error al sincronizar: ' + (error instanceof Error ? error.message : 'Unknown error'))
+      const message = error instanceof Error ? error.message : 'Unknown error'
+      if (message.includes('BGG API')) {
+        toast.error('BGG está tardando mucho. Intenta de nuevo en unos segundos.')
+      } else {
+        toast.error('Error al sincronizar: ' + message)
+      }
     } finally {
       setIsSyncing(false)
     }

@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getUserCollection } from '@/lib/bgg/api'
 import { createClient } from '@/lib/supabase/server'
-
-// Extend timeout for large collections (max 60s on Vercel Pro, 10s on free)
-export const maxDuration = 60
+import type { BGGCollectionItem } from '@/types'
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
@@ -28,8 +26,8 @@ export async function GET(request: NextRequest) {
   }
 }
 
+// POST now receives collection data from client (client fetches from BGG)
 export async function POST(request: NextRequest) {
-  // Sync collection to database
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
@@ -38,20 +36,15 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('bgg_username')
-      .eq('id', user.id)
-      .single()
+    const body = await request.json()
+    const collection: BGGCollectionItem[] = body.collection
 
-    if (!profile?.bgg_username) {
+    if (!collection || !Array.isArray(collection)) {
       return NextResponse.json(
-        { error: 'No BGG username configured' },
+        { error: 'Collection data is required' },
         { status: 400 }
       )
     }
-
-    const collection = await getUserCollection(profile.bgg_username)
 
     // Prepare batch data
     const gamesData = collection.map(item => ({
@@ -76,37 +69,29 @@ export async function POST(request: NextRequest) {
       last_synced: new Date().toISOString(),
     }))
 
-    // Batch upsert games (in chunks of 100 to avoid payload limits)
-    const CHUNK_SIZE = 100
-    for (let i = 0; i < gamesData.length; i += CHUNK_SIZE) {
-      const chunk = gamesData.slice(i, i + CHUNK_SIZE)
-      const { error: gameError } = await supabase
-        .from('games')
-        .upsert(chunk, { onConflict: 'bgg_id' })
+    // Batch upsert games
+    const { error: gameError } = await supabase
+      .from('games')
+      .upsert(gamesData, { onConflict: 'bgg_id' })
 
-      if (gameError) {
-        console.error('Games batch upsert error:', gameError)
-        throw new Error(`Games upsert failed: ${gameError.message}`)
-      }
+    if (gameError) {
+      console.error('Games batch upsert error:', gameError)
+      throw new Error(`Games upsert failed: ${gameError.message}`)
     }
 
     // Batch upsert collection entries
-    for (let i = 0; i < collectionData.length; i += CHUNK_SIZE) {
-      const chunk = collectionData.slice(i, i + CHUNK_SIZE)
-      const { error: collectionError } = await supabase
-        .from('game_collections')
-        .upsert(chunk, { onConflict: 'user_id,game_id' })
+    const { error: collectionError } = await supabase
+      .from('game_collections')
+      .upsert(collectionData, { onConflict: 'user_id,game_id' })
 
-      if (collectionError) {
-        console.error('Collection batch upsert error:', collectionError)
-        throw new Error(`Collection upsert failed: ${collectionError.message}`)
-      }
+    if (collectionError) {
+      console.error('Collection batch upsert error:', collectionError)
+      throw new Error(`Collection upsert failed: ${collectionError.message}`)
     }
 
     return NextResponse.json({ 
       success: true, 
       count: collection.length,
-      message: `Sincronizados ${collection.length} juegos`
     })
   } catch (error) {
     console.error('Sync error:', error)

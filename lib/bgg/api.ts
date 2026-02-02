@@ -20,7 +20,7 @@ function setCache(key: string, data: unknown): void {
   cache.set(key, { data, timestamp: Date.now() })
 }
 
-async function fetchWithRetry(url: string, retries = 5): Promise<Response> {
+async function fetchWithRetry(url: string, retries = 4): Promise<Response> {
   let lastError: Error | null = null
   
   for (let i = 0; i < retries; i++) {
@@ -31,10 +31,12 @@ async function fetchWithRetry(url: string, retries = 5): Promise<Response> {
         },
       })
       
-      // BGG returns 202 when the request is queued - need to wait longer
+      // BGG returns 202 when the request is queued
       if (response.status === 202) {
-        console.log(`BGG returned 202, attempt ${i + 1}/${retries}, waiting...`)
-        await new Promise(resolve => setTimeout(resolve, 3000))
+        console.log(`BGG returned 202, attempt ${i + 1}/${retries}`)
+        if (i < retries - 1) {
+          await new Promise(resolve => setTimeout(resolve, 2000))
+        }
         continue
       }
       
@@ -46,19 +48,19 @@ async function fetchWithRetry(url: string, retries = 5): Promise<Response> {
       lastError = new Error(`BGG returned status ${response.status}`)
       
       if (i < retries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1500 * (i + 1)))
+        await new Promise(resolve => setTimeout(resolve, 1000))
       }
     } catch (error) {
       console.log(`BGG fetch error, attempt ${i + 1}/${retries}:`, error)
       lastError = error instanceof Error ? error : new Error('Unknown fetch error')
       
       if (i < retries - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1500 * (i + 1)))
+        await new Promise(resolve => setTimeout(resolve, 1000))
       }
     }
   }
   
-  throw new Error(`Failed to fetch from BGG API after ${retries} retries: ${lastError?.message || 'Unknown error'}`)
+  throw new Error(`BGG API tardó demasiado. Intenta de nuevo (la colección se está procesando).`)
 }
 
 export async function getUserCollection(username: string): Promise<BGGCollectionItem[]> {
