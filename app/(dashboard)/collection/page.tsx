@@ -7,11 +7,12 @@ import { toast } from 'sonner'
 import { createClient } from '@/lib/supabase/client'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import Link from 'next/link'
+import type { BGGCollectionItem } from '@/types'
 
 interface CollectionGame {
   id: string
@@ -85,6 +86,104 @@ export default function CollectionPage() {
     setIsLoading(false)
   }
 
+  // Fetch BGG collection directly from client via CORS proxy (no Vercel timeout!)
+  async function fetchBGGCollection(username: string): Promise<BGGCollectionItem[]> {
+    const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
+    // Use CORS proxy to bypass BGG's lack of CORS headers
+    const PROXY_URL = `https://corsproxy.io/?${encodeURIComponent(BGG_URL)}`
+    
+    // Try multiple times - BGG returns 202 while processing
+    for (let attempt = 0; attempt < 15; attempt++) {
+      toast.info(`Contactando BGG... (intento ${attempt + 1}/15)`)
+      
+      try {
+        const response = await fetch(PROXY_URL)
+        
+        if (response.status === 202) {
+          // BGG is processing, wait and retry
+          await new Promise(resolve => setTimeout(resolve, 3000))
+          continue
+        }
+        
+        if (!response.ok) {
+          throw new Error(`BGG respondió con error ${response.status}`)
+        }
+        
+        const xml = await response.text()
+        
+        // Check if it's actually a 202 response in XML form
+        if (xml.includes('Your request for this collection has been accepted')) {
+          await new Promise(resolve => setTimeout(resolve, 3000))
+          continue
+        }
+        
+        return parseBGGXML(xml)
+      } catch (error) {
+        console.error('Fetch error:', error)
+        if (attempt < 14) {
+          await new Promise(resolve => setTimeout(resolve, 2000))
+          continue
+        }
+        throw error
+      }
+    }
+    
+    throw new Error('BGG tardó demasiado en procesar la colección. Intenta de nuevo.')
+  }
+
+  function parseBGGXML(xml: string): BGGCollectionItem[] {
+    const parser = new DOMParser()
+    const doc = parser.parseFromString(xml, 'text/xml')
+    
+    const items = doc.querySelectorAll('item')
+    const collection: BGGCollectionItem[] = []
+    
+    items.forEach(item => {
+      const bggId = parseInt(item.getAttribute('objectid') || '0', 10)
+      const nameEl = item.querySelector('name')
+      const name = nameEl?.textContent || 'Unknown'
+      const thumbnail = item.querySelector('thumbnail')?.textContent || undefined
+      const image = item.querySelector('image')?.textContent || undefined
+      const yearEl = item.querySelector('yearpublished')
+      const yearPublished = yearEl ? parseInt(yearEl.textContent || '0', 10) : undefined
+      const numPlays = parseInt(item.querySelector('numplays')?.textContent || '0', 10)
+      
+      const stats = item.querySelector('stats')
+      const minPlayers = parseInt(stats?.getAttribute('minplayers') || '1', 10)
+      const maxPlayers = parseInt(stats?.getAttribute('maxplayers') || '99', 10)
+      const playingTime = parseInt(stats?.getAttribute('playingtime') || '0', 10)
+      
+      const rating = item.querySelector('rating')
+      const userRatingVal = rating?.getAttribute('value')
+      const userRating = userRatingVal && userRatingVal !== 'N/A' ? parseFloat(userRatingVal) : undefined
+      
+      const avgRating = rating?.querySelector('average')?.getAttribute('value')
+      const bggRating = avgRating ? parseFloat(avgRating) : undefined
+      
+      const status = item.querySelector('status')
+      const own = status?.getAttribute('own') === '1'
+      const wantToPlay = status?.getAttribute('wanttoplay') === '1'
+      
+      collection.push({
+        bggId,
+        name,
+        thumbnail,
+        image,
+        minPlayers,
+        maxPlayers,
+        playingTime,
+        bggRating,
+        yearPublished,
+        userRating,
+        own,
+        wantToPlay,
+        numPlays,
+      })
+    })
+    
+    return collection
+  }
+
   async function syncCollection() {
     if (!bggUsername) {
       toast.error('Configura tu usuario de BGG primero')
@@ -94,19 +193,12 @@ export default function CollectionPage() {
 
     setIsSyncing(true)
     try {
-      // Step 1: Fetch collection from BGG (via our API)
-      toast.info('Obteniendo colección de BGG...')
-      const bggResponse = await fetch(`/api/bgg/collection?username=${encodeURIComponent(bggUsername)}`)
-      
-      if (!bggResponse.ok) {
-        const bggError = await bggResponse.json()
-        throw new Error(bggError.error || 'Error al obtener colección de BGG')
-      }
-      
-      const collection = await bggResponse.json()
+      // Step 1: Fetch collection directly from BGG (client-side, no timeout!)
+      const collection = await fetchBGGCollection(bggUsername)
       
       if (collection.length === 0) {
         toast.info('No se encontraron juegos en tu colección de BGG')
+        setIsSyncing(false)
         return
       }
 
@@ -116,6 +208,7 @@ export default function CollectionPage() {
       
       for (let i = 0; i < collection.length; i += BATCH_SIZE) {
         const batch = collection.slice(i, i + BATCH_SIZE)
+        toast.info(`Guardando juegos ${i + 1}-${Math.min(i + BATCH_SIZE, collection.length)}...`)
         
         const response = await fetch('/api/bgg/collection', {
           method: 'POST',
@@ -133,11 +226,7 @@ export default function CollectionPage() {
       await loadCollection()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
-      if (message.includes('BGG API')) {
-        toast.error('BGG está tardando mucho. Intenta de nuevo en unos segundos.')
-      } else {
-        toast.error('Error al sincronizar: ' + message)
-      }
+      toast.error('Error al sincronizar: ' + message)
     } finally {
       setIsSyncing(false)
     }
