@@ -52,7 +52,7 @@ export async function POST(request: NextRequest) {
 
     // Upsert games
     for (const item of collection) {
-      await supabase.from('games').upsert({
+      const { error: gameError } = await supabase.from('games').upsert({
         bgg_id: item.bggId,
         name: item.name,
         thumbnail: item.thumbnail,
@@ -64,8 +64,13 @@ export async function POST(request: NextRequest) {
         year_published: item.yearPublished,
       }, { onConflict: 'bgg_id' })
 
+      if (gameError) {
+        console.error('Game upsert error:', gameError, 'Item:', item.name, item.bggId)
+        throw new Error(`Game upsert failed: ${gameError.message}`)
+      }
+
       // Upsert collection entry
-      await supabase.from('game_collections').upsert({
+      const { error: collectionError } = await supabase.from('game_collections').upsert({
         user_id: user.id,
         game_id: item.bggId,
         user_rating: item.userRating,
@@ -74,6 +79,11 @@ export async function POST(request: NextRequest) {
         num_plays: item.numPlays,
         last_synced: new Date().toISOString(),
       }, { onConflict: 'user_id,game_id' })
+
+      if (collectionError) {
+        console.error('Collection upsert error:', collectionError, 'Item:', item.name)
+        throw new Error(`Collection upsert failed: ${collectionError.message}`)
+      }
     }
 
     return NextResponse.json({ 
@@ -83,8 +93,9 @@ export async function POST(request: NextRequest) {
     })
   } catch (error) {
     console.error('Sync error:', error)
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
     return NextResponse.json(
-      { error: 'Failed to sync collection' },
+      { error: 'Failed to sync collection', details: errorMessage },
       { status: 500 }
     )
   }
