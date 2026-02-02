@@ -86,25 +86,60 @@ export default function CollectionPage() {
     setIsLoading(false)
   }
 
-  // Fetch BGG collection via our Edge Function proxy (30s timeout)
+  // Fetch BGG collection via polling (handles BGG's slow processing)
   async function fetchBGGCollection(username: string): Promise<BGGCollectionItem[]> {
-    // First attempt with our edge proxy
-    toast.info('Contactando BGG...')
+    const MAX_ATTEMPTS = 20
     
-    const response = await fetch(`/api/bgg/proxy?username=${encodeURIComponent(username)}`)
-    
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.error || 'Error al contactar BGG')
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      toast.info(`Contactando BGG... (intento ${attempt}/${MAX_ATTEMPTS})`)
+      
+      try {
+        const response = await fetch(`/api/bgg/proxy?username=${encodeURIComponent(username)}`)
+        
+        // BGG is still processing - wait and retry
+        if (response.status === 202) {
+          toast.info('BGG está procesando tu colección...')
+          await new Promise(resolve => setTimeout(resolve, 5000))
+          continue
+        }
+        
+        if (!response.ok) {
+          const error = await response.json()
+          // If it's a server error, retry
+          if (response.status >= 500 && attempt < MAX_ATTEMPTS) {
+            await new Promise(resolve => setTimeout(resolve, 3000))
+            continue
+          }
+          throw new Error(error.error || 'Error al contactar BGG')
+        }
+        
+        const text = await response.text()
+        
+        // Check if it's JSON error or XML
+        if (text.startsWith('{')) {
+          const json = JSON.parse(text)
+          if (json.status === 'processing') {
+            await new Promise(resolve => setTimeout(resolve, 5000))
+            continue
+          }
+          throw new Error(json.error || 'Error desconocido')
+        }
+        
+        if (!text.includes('<items')) {
+          await new Promise(resolve => setTimeout(resolve, 3000))
+          continue
+        }
+        
+        return parseBGGXML(text)
+      } catch (error) {
+        if (attempt === MAX_ATTEMPTS) {
+          throw error
+        }
+        await new Promise(resolve => setTimeout(resolve, 3000))
+      }
     }
     
-    const xml = await response.text()
-    
-    if (!xml.includes('<items')) {
-      throw new Error('Respuesta inválida de BGG')
-    }
-    
-    return parseBGGXML(xml)
+    throw new Error('BGG tardó demasiado. Intenta de nuevo en unos minutos.')
   }
 
   function parseBGGXML(xml: string): BGGCollectionItem[] {
