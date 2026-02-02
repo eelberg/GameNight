@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getUserCollection } from '@/lib/bgg/api'
 import { createClient } from '@/lib/supabase/server'
 import type { BGGCollectionItem } from '@/types'
 
@@ -14,13 +13,52 @@ export async function GET(request: NextRequest) {
     )
   }
 
+  const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
+
   try {
-    const collection = await getUserCollection(username)
-    return NextResponse.json(collection)
+    const response = await fetch(BGG_URL, {
+      headers: {
+        'Accept': 'application/xml',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+    })
+
+    // BGG returns 202 when processing - tell client to retry
+    if (response.status === 202) {
+      return NextResponse.json(
+        { error: 'BGG está procesando', retry: true },
+        { status: 202 }
+      )
+    }
+
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: `BGG error: ${response.status}`, retry: response.status >= 500 },
+        { status: 502 }
+      )
+    }
+
+    const xml = await response.text()
+
+    // Check for processing message in XML
+    if (xml.includes('Your request for this collection has been accepted')) {
+      return NextResponse.json(
+        { error: 'BGG está procesando', retry: true },
+        { status: 202 }
+      )
+    }
+
+    // Return XML for client to parse (faster, avoids server timeout on large collections)
+    return new NextResponse(xml, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/xml',
+      },
+    })
   } catch (error) {
     console.error('BGG API error:', error)
     return NextResponse.json(
-      { error: 'Failed to fetch collection from BoardGameGeek' },
+      { error: 'Error al contactar BGG', retry: true },
       { status: 500 }
     )
   }

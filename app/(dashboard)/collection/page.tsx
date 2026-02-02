@@ -86,7 +86,7 @@ export default function CollectionPage() {
     setIsLoading(false)
   }
 
-  // Fetch BGG collection using bgg-json wrapper (has CORS enabled)
+  // Fetch BGG collection via our API proxy
   async function fetchBGGCollection(username: string): Promise<BGGCollectionItem[]> {
     const MAX_ATTEMPTS = 15
     
@@ -94,53 +94,36 @@ export default function CollectionPage() {
       toast.info(`Contactando BGG... (intento ${attempt}/${MAX_ATTEMPTS})`)
       
       try {
-        // Use bgg-json.azurewebsites.net - a JSON wrapper for BGG API with CORS
-        const response = await fetch(
-          `https://bgg-json.azurewebsites.net/collection/${encodeURIComponent(username)}?own=true&stats=true`
-        )
+        const response = await fetch(`/api/bgg/collection?username=${encodeURIComponent(username)}`)
         
-        // Service might return 202 while BGG processes
-        if (response.status === 202 || response.status === 503) {
+        // Check for processing status (202 or JSON error with retry flag)
+        if (response.status === 202) {
           toast.info('BGG está procesando tu colección...')
           await new Promise(resolve => setTimeout(resolve, 5000))
           continue
         }
         
-        if (!response.ok) {
-          if (response.status >= 500 && attempt < MAX_ATTEMPTS) {
+        const contentType = response.headers.get('content-type') || ''
+        
+        // If JSON, it's an error response
+        if (contentType.includes('application/json')) {
+          const errorData = await response.json()
+          if (errorData.retry || response.status >= 500) {
             await new Promise(resolve => setTimeout(resolve, 4000))
             continue
           }
-          throw new Error(`Error ${response.status} al contactar BGG`)
+          throw new Error(errorData.error || `Error ${response.status}`)
         }
         
-        const data = await response.json()
+        // Otherwise it's XML - parse it
+        const xml = await response.text()
         
-        // Check if empty or error
-        if (!data || (Array.isArray(data) && data.length === 0)) {
-          if (attempt < MAX_ATTEMPTS) {
-            await new Promise(resolve => setTimeout(resolve, 4000))
-            continue
-          }
-          return []
+        if (!xml.includes('<items')) {
+          await new Promise(resolve => setTimeout(resolve, 4000))
+          continue
         }
         
-        // Map from bgg-json format to our format
-        return data.map((item: Record<string, unknown>) => ({
-          bggId: item.gameId as number,
-          name: item.name as string,
-          thumbnail: item.thumbnail as string | undefined,
-          image: item.image as string | undefined,
-          minPlayers: (item.minPlayers as number) || 1,
-          maxPlayers: (item.maxPlayers as number) || 99,
-          playingTime: (item.playingTime as number) || 0,
-          bggRating: item.averageRating as number | undefined,
-          yearPublished: item.yearPublished as number | undefined,
-          userRating: item.rating === 0 ? undefined : item.rating as number | undefined,
-          own: true,
-          wantToPlay: false,
-          numPlays: (item.numPlays as number) || 0,
-        }))
+        return parseBGGXML(xml)
       } catch (error) {
         console.error('Fetch error:', error)
         if (attempt === MAX_ATTEMPTS) {
