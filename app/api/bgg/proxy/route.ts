@@ -16,33 +16,45 @@ export async function GET(request: NextRequest) {
 
   const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
   
+  let lastStatus = 0
+  let lastError = ''
+  
   // Try multiple times - BGG returns 202 while processing
   for (let attempt = 0; attempt < 8; attempt++) {
     try {
       const response = await fetch(BGG_URL, {
         headers: {
           'Accept': 'application/xml',
+          'User-Agent': 'GameNight/1.0',
         },
       })
       
+      lastStatus = response.status
+      
       // BGG returns 202 when request is queued
       if (response.status === 202) {
-        await new Promise(resolve => setTimeout(resolve, 3000))
+        await new Promise(resolve => setTimeout(resolve, 3500))
         continue
       }
       
       if (!response.ok) {
-        return new Response(JSON.stringify({ error: `BGG error: ${response.status}` }), {
-          status: 502,
-          headers: { 'Content-Type': 'application/json' },
-        })
+        lastError = `BGG returned ${response.status}`
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        continue
       }
       
       const xml = await response.text()
       
       // Check for queued message in XML
       if (xml.includes('Your request for this collection has been accepted')) {
-        await new Promise(resolve => setTimeout(resolve, 3000))
+        await new Promise(resolve => setTimeout(resolve, 3500))
+        continue
+      }
+      
+      // Check for error message
+      if (xml.includes('<error>') || xml.includes('<errors>')) {
+        lastError = 'BGG returned error in XML'
+        await new Promise(resolve => setTimeout(resolve, 2000))
         continue
       }
       
@@ -51,11 +63,12 @@ export async function GET(request: NextRequest) {
         status: 200,
         headers: { 
           'Content-Type': 'application/xml',
-          'Cache-Control': 'public, max-age=300', // Cache for 5 min
+          'Cache-Control': 'public, max-age=300',
         },
       })
     } catch (error) {
-      console.error('BGG fetch error:', error)
+      lastError = error instanceof Error ? error.message : 'Unknown error'
+      console.error(`BGG fetch error (attempt ${attempt + 1}):`, error)
       if (attempt < 7) {
         await new Promise(resolve => setTimeout(resolve, 2000))
         continue
@@ -64,7 +77,7 @@ export async function GET(request: NextRequest) {
   }
   
   return new Response(JSON.stringify({ 
-    error: 'BGG tardó demasiado. Tu colección está siendo procesada, intenta de nuevo en 30 segundos.' 
+    error: `BGG no respondió después de 8 intentos. Último status: ${lastStatus}. Error: ${lastError}. Intenta de nuevo en 30 segundos.`
   }), {
     status: 504,
     headers: { 'Content-Type': 'application/json' },
