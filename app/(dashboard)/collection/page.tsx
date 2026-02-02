@@ -86,54 +86,25 @@ export default function CollectionPage() {
     setIsLoading(false)
   }
 
-  // Fetch BGG collection directly from client via CORS proxy (no Vercel timeout!)
+  // Fetch BGG collection via our Edge Function proxy (30s timeout)
   async function fetchBGGCollection(username: string): Promise<BGGCollectionItem[]> {
-    const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
-    // Use allorigins CORS proxy
-    const PROXY_URL = `https://api.allorigins.win/raw?url=${encodeURIComponent(BGG_URL)}`
+    // First attempt with our edge proxy
+    toast.info('Contactando BGG...')
     
-    // Try multiple times - BGG returns 202 while processing
-    for (let attempt = 0; attempt < 15; attempt++) {
-      toast.info(`Contactando BGG... (intento ${attempt + 1}/15)`)
-      
-      try {
-        const response = await fetch(PROXY_URL)
-        const text = await response.text()
-        
-        // allorigins might return error as text
-        if (!response.ok || text.includes('error')) {
-          console.log('Response:', response.status, text.substring(0, 200))
-          await new Promise(resolve => setTimeout(resolve, 3000))
-          continue
-        }
-        
-        // Check if it's a 202 response (BGG queued the request)
-        if (text.includes('Your request for this collection has been accepted') || 
-            text.includes('message') && text.includes('processed')) {
-          toast.info('BGG está procesando tu colección...')
-          await new Promise(resolve => setTimeout(resolve, 4000))
-          continue
-        }
-        
-        // Check if we got valid XML
-        if (!text.includes('<items')) {
-          console.log('Invalid response:', text.substring(0, 200))
-          await new Promise(resolve => setTimeout(resolve, 3000))
-          continue
-        }
-        
-        return parseBGGXML(text)
-      } catch (error) {
-        console.error('Fetch error:', error)
-        if (attempt < 14) {
-          await new Promise(resolve => setTimeout(resolve, 2000))
-          continue
-        }
-        throw error
-      }
+    const response = await fetch(`/api/bgg/proxy?username=${encodeURIComponent(username)}`)
+    
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || 'Error al contactar BGG')
     }
     
-    throw new Error('BGG tardó demasiado en procesar la colección. Intenta de nuevo.')
+    const xml = await response.text()
+    
+    if (!xml.includes('<items')) {
+      throw new Error('Respuesta inválida de BGG')
+    }
+    
+    return parseBGGXML(xml)
   }
 
   function parseBGGXML(xml: string): BGGCollectionItem[] {
