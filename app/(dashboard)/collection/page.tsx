@@ -189,6 +189,120 @@ export default function CollectionPage() {
     return collection
   }
 
+  async function handleCSVImport(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setIsSyncing(true)
+    toast.info('Procesando archivo CSV...')
+
+    try {
+      const text = await file.text()
+      const lines = text.split('\n')
+      
+      // Parse CSV header
+      const header = lines[0].split(',').map(h => h.replace(/"/g, '').trim().toLowerCase())
+      
+      // Find column indices
+      const objectIdIdx = header.findIndex(h => h === 'objectid' || h === 'bggid')
+      const nameIdx = header.findIndex(h => h === 'objectname' || h === 'name')
+      const yearIdx = header.findIndex(h => h === 'yearpublished')
+      const ratingIdx = header.findIndex(h => h === 'rating' || h === 'userrating')
+      const numPlaysIdx = header.findIndex(h => h === 'numplays')
+      const ownIdx = header.findIndex(h => h === 'own')
+      const minPlayersIdx = header.findIndex(h => h === 'minplayers')
+      const maxPlayersIdx = header.findIndex(h => h === 'maxplayers')
+      const playingTimeIdx = header.findIndex(h => h === 'playingtime')
+      const thumbnailIdx = header.findIndex(h => h === 'thumbnail')
+      const imageIdx = header.findIndex(h => h === 'image' || h === 'imageid')
+      const avgRatingIdx = header.findIndex(h => h === 'avgrating' || h === 'average')
+
+      if (objectIdIdx === -1 || nameIdx === -1) {
+        throw new Error('CSV inválido. Asegúrate de exportarlo desde BGG.')
+      }
+
+      const collection: BGGCollectionItem[] = []
+
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim()
+        if (!line) continue
+
+        // Parse CSV line (handle quoted values with commas)
+        const values: string[] = []
+        let current = ''
+        let inQuotes = false
+        
+        for (const char of line) {
+          if (char === '"') {
+            inQuotes = !inQuotes
+          } else if (char === ',' && !inQuotes) {
+            values.push(current.trim())
+            current = ''
+          } else {
+            current += char
+          }
+        }
+        values.push(current.trim())
+
+        const bggId = parseInt(values[objectIdIdx], 10)
+        if (isNaN(bggId)) continue
+
+        const own = ownIdx !== -1 ? values[ownIdx] === '1' : true
+        if (!own) continue // Only import owned games
+
+        collection.push({
+          bggId,
+          name: values[nameIdx]?.replace(/"/g, '') || 'Unknown',
+          thumbnail: thumbnailIdx !== -1 ? values[thumbnailIdx] : undefined,
+          image: imageIdx !== -1 ? values[imageIdx] : undefined,
+          minPlayers: minPlayersIdx !== -1 ? parseInt(values[minPlayersIdx], 10) || 1 : 1,
+          maxPlayers: maxPlayersIdx !== -1 ? parseInt(values[maxPlayersIdx], 10) || 99 : 99,
+          playingTime: playingTimeIdx !== -1 ? parseInt(values[playingTimeIdx], 10) || 0 : 0,
+          bggRating: avgRatingIdx !== -1 ? parseFloat(values[avgRatingIdx]) || undefined : undefined,
+          yearPublished: yearIdx !== -1 ? parseInt(values[yearIdx], 10) || undefined : undefined,
+          userRating: ratingIdx !== -1 && values[ratingIdx] !== 'N/A' && values[ratingIdx] !== '' 
+            ? parseFloat(values[ratingIdx]) || undefined 
+            : undefined,
+          own: true,
+          wantToPlay: false,
+          numPlays: numPlaysIdx !== -1 ? parseInt(values[numPlaysIdx], 10) || 0 : 0,
+        })
+      }
+
+      if (collection.length === 0) {
+        throw new Error('No se encontraron juegos en el CSV')
+      }
+
+      toast.info(`Guardando ${collection.length} juegos...`)
+
+      // Save to database in batches
+      const BATCH_SIZE = 50
+      for (let i = 0; i < collection.length; i += BATCH_SIZE) {
+        const batch = collection.slice(i, i + BATCH_SIZE)
+        
+        const response = await fetch('/api/bgg/collection', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ collection: batch }),
+        })
+
+        if (!response.ok) {
+          const result = await response.json()
+          throw new Error(result.details || result.error || 'Error al guardar')
+        }
+      }
+
+      toast.success(`Importados ${collection.length} juegos desde CSV`)
+      await loadCollection()
+    } catch (error) {
+      toast.error('Error al importar: ' + (error instanceof Error ? error.message : 'Unknown error'))
+    } finally {
+      setIsSyncing(false)
+      // Reset the file input
+      event.target.value = ''
+    }
+  }
+
   async function syncCollection() {
     if (!bggUsername) {
       toast.error('Configura tu usuario de BGG primero')
@@ -262,10 +376,26 @@ export default function CollectionPage() {
             {collection.length} juegos en tu colección
           </p>
         </div>
-        <Button onClick={syncCollection} disabled={isSyncing}>
-          <RefreshCw className={`mr-2 h-4 w-4 ${isSyncing ? 'animate-spin' : ''}`} />
-          {isSyncing ? 'Sincronizando...' : 'Sincronizar con BGG'}
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={syncCollection} disabled={isSyncing}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${isSyncing ? 'animate-spin' : ''}`} />
+            {isSyncing ? 'Sincronizando...' : 'Sincronizar con BGG'}
+          </Button>
+          <label>
+            <Button variant="outline" asChild disabled={isSyncing}>
+              <span>
+                <input
+                  type="file"
+                  accept=".csv"
+                  className="hidden"
+                  onChange={handleCSVImport}
+                  disabled={isSyncing}
+                />
+                Importar CSV
+              </span>
+            </Button>
+          </label>
+        </div>
       </div>
 
       {!bggUsername && (
@@ -273,13 +403,28 @@ export default function CollectionPage() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>Usuario de BGG no configurado</AlertTitle>
           <AlertDescription>
-            Para sincronizar tu colección, configura tu usuario de BoardGameGeek en{' '}
+            Configura tu usuario de BoardGameGeek en{' '}
             <Link href="/settings" className="font-medium underline">
               Configuración
             </Link>
+            {' '}o importa tu colección usando el botón &quot;Importar CSV&quot;.
           </AlertDescription>
         </Alert>
       )}
+
+      <Alert className="mb-6">
+        <AlertCircle className="h-4 w-4" />
+        <AlertTitle>¿Problemas con la sincronización?</AlertTitle>
+        <AlertDescription>
+          Si la sincronización automática falla, puedes importar tu colección manualmente:
+          <ol className="list-decimal ml-4 mt-2 space-y-1 text-sm">
+            <li>Ve a <a href="https://boardgamegeek.com/collection/user/" target="_blank" rel="noopener noreferrer" className="underline">tu colección en BGG</a></li>
+            <li>Haz clic en el botón &quot;⋯&quot; (más opciones) arriba de tu colección</li>
+            <li>Selecciona &quot;Export Collection to CSV&quot;</li>
+            <li>Descarga el archivo y usa el botón &quot;Importar CSV&quot; aquí</li>
+          </ol>
+        </AlertDescription>
+      </Alert>
 
       {collection.length === 0 && bggUsername ? (
         <Card>
