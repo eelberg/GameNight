@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getUserCollection } from '@/lib/bgg/api'
 import { createClient } from '@/lib/supabase/server'
 
+// Extend timeout for large collections (max 60s on Vercel Pro, 10s on free)
+export const maxDuration = 60
+
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams
   const username = searchParams.get('username')
@@ -50,38 +53,52 @@ export async function POST(request: NextRequest) {
 
     const collection = await getUserCollection(profile.bgg_username)
 
-    // Upsert games
-    for (const item of collection) {
-      const { error: gameError } = await supabase.from('games').upsert({
-        bgg_id: item.bggId,
-        name: item.name,
-        thumbnail: item.thumbnail,
-        image: item.image,
-        min_players: item.minPlayers,
-        max_players: item.maxPlayers,
-        playing_time: item.playingTime,
-        bgg_rating: item.bggRating,
-        year_published: item.yearPublished,
-      }, { onConflict: 'bgg_id' })
+    // Prepare batch data
+    const gamesData = collection.map(item => ({
+      bgg_id: item.bggId,
+      name: item.name,
+      thumbnail: item.thumbnail,
+      image: item.image,
+      min_players: item.minPlayers,
+      max_players: item.maxPlayers,
+      playing_time: item.playingTime,
+      bgg_rating: item.bggRating,
+      year_published: item.yearPublished,
+    }))
+
+    const collectionData = collection.map(item => ({
+      user_id: user.id,
+      game_id: item.bggId,
+      user_rating: item.userRating,
+      own: item.own,
+      want_to_play: item.wantToPlay,
+      num_plays: item.numPlays,
+      last_synced: new Date().toISOString(),
+    }))
+
+    // Batch upsert games (in chunks of 100 to avoid payload limits)
+    const CHUNK_SIZE = 100
+    for (let i = 0; i < gamesData.length; i += CHUNK_SIZE) {
+      const chunk = gamesData.slice(i, i + CHUNK_SIZE)
+      const { error: gameError } = await supabase
+        .from('games')
+        .upsert(chunk, { onConflict: 'bgg_id' })
 
       if (gameError) {
-        console.error('Game upsert error:', gameError, 'Item:', item.name, item.bggId)
-        throw new Error(`Game upsert failed: ${gameError.message}`)
+        console.error('Games batch upsert error:', gameError)
+        throw new Error(`Games upsert failed: ${gameError.message}`)
       }
+    }
 
-      // Upsert collection entry
-      const { error: collectionError } = await supabase.from('game_collections').upsert({
-        user_id: user.id,
-        game_id: item.bggId,
-        user_rating: item.userRating,
-        own: item.own,
-        want_to_play: item.wantToPlay,
-        num_plays: item.numPlays,
-        last_synced: new Date().toISOString(),
-      }, { onConflict: 'user_id,game_id' })
+    // Batch upsert collection entries
+    for (let i = 0; i < collectionData.length; i += CHUNK_SIZE) {
+      const chunk = collectionData.slice(i, i + CHUNK_SIZE)
+      const { error: collectionError } = await supabase
+        .from('game_collections')
+        .upsert(chunk, { onConflict: 'user_id,game_id' })
 
       if (collectionError) {
-        console.error('Collection upsert error:', collectionError, 'Item:', item.name)
+        console.error('Collection batch upsert error:', collectionError)
         throw new Error(`Collection upsert failed: ${collectionError.message}`)
       }
     }
