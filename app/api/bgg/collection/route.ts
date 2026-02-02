@@ -14,14 +14,25 @@ export async function GET(request: NextRequest) {
   }
 
   const BGG_URL = `https://boardgamegeek.com/xmlapi2/collection?username=${encodeURIComponent(username)}&own=1&stats=1`
+  
+  // Try using a CORS proxy service
+  const PROXY_URL = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(BGG_URL)}`
 
   try {
-    const response = await fetch(BGG_URL, {
+    // First try direct fetch
+    let response = await fetch(BGG_URL, {
       headers: {
         'Accept': 'application/xml',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
     })
+
+    // If direct fetch fails with 401/403, try proxy
+    if (response.status === 401 || response.status === 403) {
+      console.log('Direct BGG fetch blocked, trying proxy...')
+      response = await fetch(PROXY_URL)
+    }
 
     // BGG returns 202 when processing - tell client to retry
     if (response.status === 202) {
@@ -32,6 +43,7 @@ export async function GET(request: NextRequest) {
     }
 
     if (!response.ok) {
+      console.error('BGG response not ok:', response.status)
       return NextResponse.json(
         { error: `BGG error: ${response.status}`, retry: response.status >= 500 },
         { status: 502 }
@@ -47,8 +59,17 @@ export async function GET(request: NextRequest) {
         { status: 202 }
       )
     }
+    
+    // Check if we got valid XML
+    if (!xml.includes('<items')) {
+      console.error('Invalid XML response:', xml.substring(0, 200))
+      return NextResponse.json(
+        { error: 'Respuesta inválida de BGG', retry: true },
+        { status: 502 }
+      )
+    }
 
-    // Return XML for client to parse (faster, avoids server timeout on large collections)
+    // Return XML for client to parse
     return new NextResponse(xml, {
       status: 200,
       headers: {
